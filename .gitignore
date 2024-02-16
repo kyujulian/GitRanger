@@ -1,3 +1,4 @@
-./**/go.sum
-./upload_service/.env
-./deploy_service/.env
+**/go.sum
+upload_service/.env
+upload_service/out
+deploy_service/.env

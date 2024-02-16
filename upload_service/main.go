@@ -53,35 +53,22 @@ func main() {
 		log.Fatal(err)
 	}
 
-	bucket := os.Getenv("S3_BUCKET")
-
 	fmt.Println("Hello, World!")
 
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("sa-east-1"))
+
 	if err != nil {
 		log.Fatalf("unable to load SDK config, %v", err)
 	}
 
-	client := s3.NewFromConfig(cfg)
-
-	output, err := client.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
-	})
-
-	for _, object := range output.Contents {
-		fmt.Println(aws.ToString(object.Key))
-	}
-
-	if err != nil {
-		slog.Error("unable to list buckets, %v", err)
-	}
+	s3client := s3.NewFromConfig(cfg)
 
 	e := echo.New()
 	e.GET("/", func(c echo.Context) error {
 		return c.String(http.StatusOK, "Hello, World!")
 	})
 
-	app := &App{Client: client, Db: redisdb}
+	app := &App{Client: s3client, Db: redisdb}
 
 	e.POST("/deploy", app.deploy)
 
