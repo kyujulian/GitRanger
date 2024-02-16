@@ -12,7 +12,7 @@ import (
 	"context"
 	"path/filepath"
 
-	// "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -140,13 +140,58 @@ func main() {
 
 	fmt.Println("Hello, World!")
 
-	app.downloadS3Folder("gitbit", "out/eed64")
+	//Polls values from a redis queue
+	for {
 
-	// Polls values from a redis queue
-	// for {
-	//
-	// 	fmt.Println("Polling...")
-	// 	res := app.RedisClient.BRPop(0, "build-queue").Val()
-	// 	fmt.Println(res)
-	// }
+		fmt.Println("Polling...")
+		res := app.RedisClient.BRPop(0, "build-queue").Val()
+		fmt.Println(res[0])
+		app.downloadS3Folder("gitbit", filepath.Join("out", res[0])) // how will I get the proper filepath?
+	}
+}
+
+func getFiles(id string) ([]string, error) {
+	files := []string{}
+
+	err := filepath.Walk("out/"+id, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// skip directories
+		if info.IsDir() {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+
+	return files, err
+}
+
+func uploadFile(fileName string, bucketName string, client *s3.Client, ch chan<- string, wg *sync.WaitGroup) error {
+	fileContent, err := os.Open(fileName)
+	if err != nil {
+		fmt.Println("Error opening file")
+		return err
+	}
+
+	defer wg.Done()
+	defer fileContent.Close()
+
+	result, err := client.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(fileName),
+		Body:   fileContent,
+	})
+
+	if err != nil {
+		slog.Error("failed to upload file %s to bucket %s: %w", fileName, "gitbit", err)
+		return err
+
+	}
+	fmt.Println(result)
+
+	ch <- fileName
+	return nil
 }
