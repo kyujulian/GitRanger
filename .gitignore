@@ -1,4 +1,3 @@
 **/go.sum
-upload_service/.env
+**/.env
 upload_service/out
-deploy_service/.env
