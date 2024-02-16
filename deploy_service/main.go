@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/go-redis/redis"
 	"github.com/joho/godotenv"
@@ -18,27 +19,59 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
+const (
+	numWorkers = 5
+)
+
 type DeployApp struct {
 	RedisClient *redis.Client
 	S3Client    *s3.Client
+	bucketName  string
 }
 
 func (app *DeployApp) downloadS3Folder(bucket string, folder string) error {
 
-	// List all objects in the folder
-	listObjectsOutput, err := app.S3Client.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
-		Bucket: &bucket,
-		Prefix: &folder,
-	})
+	keyChan := make(chan string)
+	doneChan := make(chan bool)
+	wg := sync.WaitGroup{}
 
-	if err != nil {
-		slog.Error("Error listing objects", err)
-		return err
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go app.worker(context.TODO(), keyChan, &wg)
 	}
 
-	for _, item := range listObjectsOutput.Contents {
+	go func() {
 
-		key := *item.Key
+		// List all objects in the folder
+		listObjectsOutput, err := app.S3Client.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+			Bucket: &bucket,
+			Prefix: &folder,
+		})
+
+		if err != nil {
+			slog.Error(fmt.Sprintf("Error listing objects %v", err))
+		}
+		for _, object := range listObjectsOutput.Contents {
+			keyChan <- *object.Key
+		}
+		close(keyChan)
+
+	}()
+
+	go func() {
+		wg.Wait()
+		close(doneChan)
+	}()
+
+	<-doneChan
+	return nil
+
+}
+
+func (app *DeployApp) worker(ctx context.Context, keysChan <-chan string, wg *sync.WaitGroup) error {
+	defer wg.Done()
+
+	for key := range keysChan {
 
 		fileDir := filepath.Join(".", filepath.Dir(key))
 		if err := os.MkdirAll(fileDir, os.ModePerm); err != nil {
@@ -53,11 +86,9 @@ func (app *DeployApp) downloadS3Folder(bucket string, folder string) error {
 			continue
 		}
 
-		defer file.Close()
-
 		object, err := app.S3Client.GetObject(context.TODO(), &s3.GetObjectInput{
-			Bucket: &bucket,
-			Key:    item.Key,
+			Bucket: &app.bucketName,
+			Key:    &key,
 		})
 
 		if err != nil {
@@ -65,19 +96,19 @@ func (app *DeployApp) downloadS3Folder(bucket string, folder string) error {
 			return err
 		}
 
-		defer object.Body.Close()
-
 		if _, err := io.Copy(file, object.Body); err != nil {
 			slog.Error("Error downloading object ", key, err)
 			continue
 		}
 
-		slog.Info("Downloaded object" + key)
-
+		/// need to manually call at the end of scope
+		/// because defer keyword has different effect in goroutines
+		/// it defers the call to when the channel is closed
+		file.Close()
+		object.Body.Close()
+		slog.Info(fmt.Sprintf("Downloading object %v...", key))
 	}
-
 	return nil
-
 }
 func main() {
 
@@ -104,6 +135,7 @@ func main() {
 	app := DeployApp{
 		RedisClient: rClient,
 		S3Client:    s3Client,
+		bucketName:  "gitbit",
 	}
 
 	fmt.Println("Hello, World!")
