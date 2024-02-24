@@ -54,7 +54,7 @@ func (a *App) defaultRedisClient() *App {
 		Addr: "redis:6379",
 	})
 
-	a.Redis.WrapProcess(func(old func(cmd redis.Cmder) error) func(cmd redis.Cmder) error {
+	redisdb.WrapProcess(func(old func(cmd redis.Cmder) error) func(cmd redis.Cmder) error {
 		return func(cmd redis.Cmder) error {
 			slog.Info("starting processing: <%s>\n", cmd)
 			err := old(cmd)
