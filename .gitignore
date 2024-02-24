@@ -1,4 +1,3 @@
-go.sum
 **/.env
 **/Dockerfile
 upload_service/out
