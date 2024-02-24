@@ -1,89 +1,88 @@
-package main
+package upload
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 
-	"context"
-
 	"github.com/go-git/go-git/v5"
 	"github.com/google/uuid"
+
 	"github.com/labstack/echo/v4"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/joho/godotenv"
-	"log"
-
 	"github.com/go-redis/redis"
-
-	"log/slog"
 )
 
 type App struct {
-	Client *s3.Client
-	Db     *redis.Client
+	S3    S3Client
+	Redis RedisClient
 }
 
-func main() {
-
-	slog.Info("Starting gitbit")
-	redisdb := redis.NewClient(&redis.Options{
-		Addr: ":6379",
-	})
+func createApp() (*App, error) {
+	app := &App{}
 
 	slog.Info("Redis client created")
-	redisdb.WrapProcess(func(old func(cmd redis.Cmder) error) func(cmd redis.Cmder) error {
+	redisdb := redis.NewClient(&redis.Options{
+		Addr: "redis:6379",
+	})
+	app.Redis = redisdb
+
+	app.Redis.WrapProcess(func(old func(cmd redis.Cmder) error) func(cmd redis.Cmder) error {
 		return func(cmd redis.Cmder) error {
-			fmt.Printf("starting processing: <%s>\n", cmd)
+			slog.Info("starting processing: <%s>\n", cmd)
 			err := old(cmd)
-			fmt.Printf("finished processing: <%s>\n", cmd)
+			slog.Info("finished processing: <%s>\n", cmd)
 			return err
 		}
+
 	})
 
-	err := godotenv.Load()
+	s3client, err := NewS3()
 
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 
-	fmt.Println("Hello, World!")
+	app.S3 = s3client
 
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("sa-east-1"))
+	return app, nil
+}
 
-	if err != nil {
-		log.Fatalf("unable to load SDK config, %v", err)
-	}
+func (*App) Run() {
 
-	s3client := s3.NewFromConfig(cfg)
-
+	// err := godotenv.Load()
+	//
+	// if err != nil {
+	// 	slog.Error("Failed to load .env file")
+	// 	return
+	// }
 	e := echo.New()
-	e.GET("/", func(c echo.Context) error {
-		return c.String(http.StatusOK, "Hello, World!")
-	})
 
-	app := &App{Client: s3client, Db: redisdb}
-
-	e.POST("/deploy", app.deploy)
-
-	e.GET("/status/:id", func(c echo.Context) error {
-
-		id := c.Param("id")
-		res, err := app.Db.HGet(id, "status").Result()
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, "Error getting status")
+	// app, err := createApp()
+	// if err != nil {
+	// 	slog.Error("Failed to create app: %v", err)
+	// 	return
+	// }
+	e.GET("/health_check", func(c echo.Context) error {
+		content := struct {
+			Status string `json:"status"`
+		}{
+			Status: "ok",
 		}
-		return c.JSON(http.StatusOK, res)
-
+		return c.JSON(http.StatusOK, content)
 	})
+	// e.POST("/deploy", app.deploy)
 
-	e.Logger.Fatal(e.Start(":1323"))
+	e.Logger.Fatal(e.Start(":8080"))
+
 }
 
 type Repo struct {
@@ -91,36 +90,39 @@ type Repo struct {
 }
 
 func (a *App) deploy(c echo.Context) error {
+
 	repo := new(Repo)
+
 	if err := c.Bind(repo); err != nil {
 		return err
 	}
 
 	ch := make(chan string)
-
 	var wg sync.WaitGroup
 
 	id, err := generateId()
-
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, "Error generating id")
 	}
 
-	slog.Info("Cloning repo")
-	err = clone(repo.URL, id)
+	outputPath := "out/" + id
+	err = clone(repo.URL, outputPath)
 	slog.Info("Cloning repo" + repo.URL)
+
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, "Error cloning repo")
 	}
 
-	files, err := getFiles(id)
+	localRepoDir := outputPath
+	files, err := getFiles(localRepoDir)
+
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, "Error getting files")
 	}
 
 	for _, file := range files {
 		wg.Add(1)
-		go uploadFile(file, "gitbit", a.Client, ch, &wg)
+		go uploadFile(file, "gitbit", a.S3, ch, &wg)
 
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, "Error uploading file")
@@ -137,9 +139,9 @@ func (a *App) deploy(c echo.Context) error {
 	}{Id: id}
 
 	//Enqueue the id of the repo to be built in the other service
-	a.Db.LPush("build-queue", id)
+	a.Redis.LPush("build-queue", id)
 	//Set the status of the repo to uploaded
-	a.Db.HSet(id, "status", "uploaded")
+	a.Redis.HSet(id, "status", "uploaded")
 
 	slog.Info("Deployed repo " + repo.URL + " with id " + id)
 	return c.JSON(http.StatusOK, res)
@@ -154,9 +156,9 @@ func generateId() (string, error) {
 	return id.String()[:5], err
 }
 
-func clone(repoURL string, id string) error {
+func clone(repoURL string, outputPath string) error {
 
-	_, err := git.PlainClone("./out/"+id, false, &git.CloneOptions{
+	_, err := git.PlainClone(outputPath, false, &git.CloneOptions{
 		URL:      repoURL,
 		Progress: os.Stdout,
 	})
@@ -164,10 +166,11 @@ func clone(repoURL string, id string) error {
 	return err
 }
 
-func getFiles(id string) ([]string, error) {
+func getFiles(localRepoDir string) ([]string, error) {
+
 	files := []string{}
 
-	err := filepath.Walk("out/"+id, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(localRepoDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -183,7 +186,7 @@ func getFiles(id string) ([]string, error) {
 	return files, err
 }
 
-func uploadFile(fileName string, bucketName string, client *s3.Client, ch chan<- string, wg *sync.WaitGroup) error {
+func uploadFile(fileName string, bucketName string, client S3Client, ch chan<- string, wg *sync.WaitGroup) error {
 	fileContent, err := os.Open(fileName)
 	if err != nil {
 		fmt.Println("Error opening file")
@@ -208,4 +211,12 @@ func uploadFile(fileName string, bucketName string, client *s3.Client, ch chan<-
 
 	ch <- fileName
 	return nil
+}
+
+func NewS3() (*s3.Client, error) {
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("sa-east-1"))
+
+	client := s3.NewFromConfig(cfg)
+
+	return client, err
 }
