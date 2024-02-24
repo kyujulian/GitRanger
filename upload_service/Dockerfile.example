@@ -1,0 +1,31 @@
+FROM golang:1.22.0-alpine as build-stage
+
+
+WORKDIR /app
+
+
+COPY go.mod go.sum ./
+
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux go build  -o  /upload_service ./cmd/app
+
+
+FROM gcr.io/distroless/base-debian11 AS build-release-stage
+
+WORKDIR /
+
+COPY --from=build-stage /upload_service /upload_service
+
+ENV AWS_ACCESS_KEY_ID AKIA5FTZAASZZBYP3C6S
+ENV AWS_SECRET_ACCESS_KEY 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
+ENV S3_BUCKET gitbit
+
+EXPOSE 8080
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/upload_service"]
+
