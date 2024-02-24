@@ -26,34 +26,46 @@ type App struct {
 	Redis RedisClient
 }
 
-func createApp() (*App, error) {
+func createApp() *App {
 	app := &App{}
+	return app
+}
+func (a *App) setS3Client(client S3Client) *App {
+	a.S3 = client
+	return a
+}
 
-	slog.Info("Redis client created")
+func (a *App) setRedisClient(client RedisClient) *App {
+	a.Redis = client
+	return a
+}
+
+func (a *App) defaultS3Client() (*App, error) {
+
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("sa-east-1"))
+	client := s3.NewFromConfig(cfg)
+	a.S3 = client
+
+	return a, err
+}
+
+func (a *App) defaultRedisClient() *App {
 	redisdb := redis.NewClient(&redis.Options{
 		Addr: "redis:6379",
 	})
-	app.Redis = redisdb
 
-	app.Redis.WrapProcess(func(old func(cmd redis.Cmder) error) func(cmd redis.Cmder) error {
+	a.Redis.WrapProcess(func(old func(cmd redis.Cmder) error) func(cmd redis.Cmder) error {
 		return func(cmd redis.Cmder) error {
 			slog.Info("starting processing: <%s>\n", cmd)
 			err := old(cmd)
 			slog.Info("finished processing: <%s>\n", cmd)
 			return err
 		}
-
 	})
 
-	s3client, err := NewS3()
+	a.Redis = redisdb
 
-	if err != nil {
-		return nil, err
-	}
-
-	app.S3 = s3client
-
-	return app, nil
+	return a
 }
 
 func (*App) Run() {
@@ -66,11 +78,11 @@ func (*App) Run() {
 	// }
 	e := echo.New()
 
-	// app, err := createApp()
-	// if err != nil {
-	// 	slog.Error("Failed to create app: %v", err)
-	// 	return
-	// }
+	app, err := createApp().defaultRedisClient().defaultS3Client()
+	if err != nil {
+		slog.Error("Failed to create app: %v", err)
+		return
+	}
 	e.GET("/health_check", func(c echo.Context) error {
 		content := struct {
 			Status string `json:"status"`
@@ -79,7 +91,8 @@ func (*App) Run() {
 		}
 		return c.JSON(http.StatusOK, content)
 	})
-	// e.POST("/deploy", app.deploy)
+
+	e.POST("/deploy", app.deploy)
 
 	e.Logger.Fatal(e.Start(":8080"))
 
@@ -89,6 +102,14 @@ type Repo struct {
 	URL string `json:"repo"`
 }
 
+// / This function downloads a repo and sends it to s3 and deployment queue
+// / The json body should contain the url of the repo to be deployed
+// / JSON example:
+// / {
+// / 	"url": "github.com/username/repo"
+// / }
+// / The function returns the id of the repo that was enqueued in the deployment que
+// / The function returns a 500 status code if there is an error
 func (a *App) deploy(c echo.Context) error {
 
 	repo := new(Repo)

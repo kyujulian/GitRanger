@@ -13,7 +13,7 @@ var uploadCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		// Do Stuff Here
 
-		app, err := createApp()
+		app, err := createApp().defaultRedisClient().defaultS3Client()
 
 		if err != nil {
 			slog.Error("Failed to create app %v", err)
